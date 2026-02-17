@@ -1259,6 +1259,10 @@ def _resolve_strava_profile_url(
     interactive: bool,
     repo: str,
     tokens: Optional[dict] = None,
+    *,
+    enabled_override: Optional[bool] = None,
+    prefilled_url: str = "",
+    prompt_if_missing: bool = True,
 ) -> str:
     explicit = getattr(args, "strava_profile_url", None)
     if explicit is not None:
@@ -1275,14 +1279,30 @@ def _resolve_strava_profile_url(
     except ValueError:
         existing_value = ""
 
-    candidate = detected or existing_value
+    try:
+        prefilled_value = _normalize_strava_profile_url(prefilled_url)
+    except ValueError:
+        prefilled_value = ""
+
+    candidate = detected or prefilled_value or existing_value
+    if enabled_override is not None:
+        if not enabled_override:
+            return ""
+        if candidate:
+            return candidate
+        if interactive and prompt_if_missing:
+            return _prompt_profile_url_if_missing("strava")
+        return ""
+
     if interactive:
         enabled = _prompt_use_strava_profile_link(default_enabled=bool(candidate))
         if not enabled:
             return ""
         if candidate:
             return candidate
-        return _prompt_profile_url_if_missing("strava")
+        if prompt_if_missing:
+            return _prompt_profile_url_if_missing("strava")
+        return ""
 
     return candidate
 
@@ -1295,6 +1315,9 @@ def _resolve_garmin_profile_url(
     token_store_b64: str,
     email: str,
     password: str,
+    enabled_override: Optional[bool] = None,
+    prefilled_url: str = "",
+    prompt_if_missing: bool = True,
 ) -> str:
     explicit = getattr(args, "garmin_profile_url", None)
     if explicit is not None:
@@ -1317,16 +1340,90 @@ def _resolve_garmin_profile_url(
     except ValueError:
         existing_value = ""
 
-    candidate = detected or existing_value
+    try:
+        prefilled_value = _normalize_garmin_profile_url(prefilled_url)
+    except ValueError:
+        prefilled_value = ""
+
+    candidate = detected or prefilled_value or existing_value
+    if enabled_override is not None:
+        if not enabled_override:
+            return ""
+        if candidate:
+            return candidate
+        if interactive and prompt_if_missing:
+            return _prompt_profile_url_if_missing("garmin")
+        return ""
+
     if interactive:
         enabled = _prompt_use_garmin_profile_link(default_enabled=bool(candidate))
         if not enabled:
             return ""
         if candidate:
             return candidate
-        return _prompt_profile_url_if_missing("garmin")
+        if prompt_if_missing:
+            return _prompt_profile_url_if_missing("garmin")
+        return ""
 
     return candidate
+
+
+def _resolve_strava_profile_link_preference(
+    args: argparse.Namespace,
+    interactive: bool,
+    repo: str,
+) -> Tuple[Optional[bool], str]:
+    explicit = getattr(args, "strava_profile_url", None)
+    if explicit is not None:
+        explicit_text = str(explicit).strip()
+        if not explicit_text:
+            return False, ""
+        return True, _normalize_strava_profile_url(explicit_text)
+
+    existing_raw = _get_variable("DASHBOARD_STRAVA_PROFILE_URL", repo)
+    try:
+        existing_value = _normalize_strava_profile_url(existing_raw)
+    except ValueError:
+        existing_value = ""
+
+    if not interactive:
+        return None, existing_value
+
+    enabled = _prompt_use_strava_profile_link(default_enabled=bool(existing_value))
+    if not enabled:
+        return False, ""
+    if existing_value:
+        return True, existing_value
+    return True, _prompt_profile_url_if_missing("strava")
+
+
+def _resolve_garmin_profile_link_preference(
+    args: argparse.Namespace,
+    interactive: bool,
+    repo: str,
+) -> Tuple[Optional[bool], str]:
+    explicit = getattr(args, "garmin_profile_url", None)
+    if explicit is not None:
+        explicit_text = str(explicit).strip()
+        if not explicit_text:
+            return False, ""
+        return True, _normalize_garmin_profile_url(explicit_text)
+
+    existing_raw = _get_variable("DASHBOARD_GARMIN_PROFILE_URL", repo)
+    try:
+        existing_value = _normalize_garmin_profile_url(existing_raw)
+    except ValueError:
+        existing_value = ""
+
+    if not interactive:
+        return None, existing_value
+
+    enabled = _prompt_use_garmin_profile_link(default_enabled=bool(existing_value))
+    if not enabled:
+        return False, ""
+    if existing_value:
+        return True, existing_value
+    return True, _prompt_profile_url_if_missing("garmin")
 
 
 def _resolve_strava_activity_links(
@@ -2124,13 +2221,30 @@ def main() -> int:
     distance_unit, elevation_unit = _resolve_units(args, interactive)
     week_start = _resolve_week_start(args, interactive, repo)
 
-    print("\nUpdating repository secrets via gh...")
-    configured_secret_names: list[str] = []
-    athlete_name = ""
     strava_profile_url = ""
     strava_activity_links_enabled = False
     garmin_profile_url = ""
     garmin_activity_links_enabled = False
+    strava_profile_link_enabled_override: Optional[bool] = None
+    strava_profile_url_prefilled = ""
+    garmin_profile_link_enabled_override: Optional[bool] = None
+    garmin_profile_url_prefilled = ""
+    if source == "strava":
+        strava_activity_links_enabled = _resolve_strava_activity_links(args, interactive, repo)
+        (
+            strava_profile_link_enabled_override,
+            strava_profile_url_prefilled,
+        ) = _resolve_strava_profile_link_preference(args, interactive, repo)
+    elif source == "garmin":
+        garmin_activity_links_enabled = _resolve_garmin_activity_links(args, interactive, repo)
+        (
+            garmin_profile_link_enabled_override,
+            garmin_profile_url_prefilled,
+        ) = _resolve_garmin_profile_link_preference(args, interactive, repo)
+
+    print("\nUpdating repository secrets via gh...")
+    configured_secret_names: list[str] = []
+    athlete_name = ""
     strava_rotation_secret_ok: Optional[bool] = None
     strava_rotation_secret_detail = ""
     if source == "strava":
@@ -2179,8 +2293,15 @@ def main() -> int:
         athlete_name = " ".join(
             [str(athlete.get("firstname", "")).strip(), str(athlete.get("lastname", "")).strip()]
         ).strip()
-        strava_profile_url = _resolve_strava_profile_url(args, interactive, repo, tokens=tokens)
-        strava_activity_links_enabled = _resolve_strava_activity_links(args, interactive, repo)
+        strava_profile_url = _resolve_strava_profile_url(
+            args,
+            interactive,
+            repo,
+            tokens=tokens,
+            enabled_override=strava_profile_link_enabled_override,
+            prefilled_url=strava_profile_url_prefilled,
+            prompt_if_missing=False if strava_profile_link_enabled_override is not None else True,
+        )
     elif source == "garmin":
         token_store_b64, garmin_email, garmin_password = _resolve_garmin_auth_values(args, interactive)
         if token_store_b64:
@@ -2197,8 +2318,10 @@ def main() -> int:
             token_store_b64=token_store_b64,
             email=garmin_email,
             password=garmin_password,
+            enabled_override=garmin_profile_link_enabled_override,
+            prefilled_url=garmin_profile_url_prefilled,
+            prompt_if_missing=False if garmin_profile_link_enabled_override is not None else True,
         )
-        garmin_activity_links_enabled = _resolve_garmin_activity_links(args, interactive, repo)
     else:
         raise RuntimeError(f"Unsupported source: {source}")
 
