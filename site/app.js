@@ -2950,7 +2950,7 @@ function buildHeatmapArea(aggregates, year, units, colors, type, layout, options
       : "";
     const lines = [createTooltipTextLine(dateStr)];
     if (singleTypeLabel) {
-      lines.push(createTooltipLinkedTypeLine("1 ", singleTypeLabel, "", singleActivityLink));
+      lines.push(createTooltipLinkedTypeLine("", singleTypeLabel, "", singleActivityLink));
     } else {
       lines.push(createTooltipTextLine(formatActivityCountLabel(entry.count, type === "all" ? [] : [type])));
     }
